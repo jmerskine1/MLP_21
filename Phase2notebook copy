@@ -1,0 +1,499 @@
+
+#%%
+
+## General libraries
+import numpy as np # Numpy
+import pandas as pd # Pandas
+import pandas.plotting
+import pickle as pk # Pickles
+import datetime as datetime
+import os
+import logging
+import sys
+import astral
+import scipy
+import pytz
+from tqdm import tqdm
+import pickle
+
+#import heatmapz
+import seaborn as sns
+import matplotlib.pyplot as plt
+from pandas.plotting import scatter_matrix
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
+from astral import LocationInfo
+from astral.sun import sun
+
+## Usmodel_train_eval
+from model_train_eval import bike_inference, bike_trainer
+from utilities import data_loader, data_saver
+
+# %% Generate Phase1b dataset
+
+dw_directory = "./data"
+
+no_stations = np.linspace(201, 275, 75)
+
+dataset = pd.DataFrame()
+
+for i in no_stations:
+    # # Read dataset
+    filepath = os.path.join(dw_directory, 'Train', 'Train', 'station_' + str(int(i)) + '_deploy.csv')
+    #if os.path.exists(filepath):
+        # Read .txt file
+    with open(filepath, 'r') as f:
+         data_v = pd.read_csv(f)
+         
+    if len(dataset) == 0:
+        dataset = data_v
+    else:
+        dataset = dataset.append(data_v)
+
+        
+filepath = os.path.join(dw_directory, 'test.csv')
+#if os.path.exists(filepath):
+# Read .txt file
+with open(filepath, 'r') as f:
+    final_test = pd.read_csv(f)    
+
+#%%
+
+m_stations = np.linspace(1,75,75)
+
+## import models
+model_types = ['rlm_full_temp', 'rlm_full', 'rlm_short_full_temp', 
+                'rlm_short_full', 'rlm_short_temp', 'rlm_short']
+
+models = {}
+for m in model_types:
+    # # Read model
+    models[m] = {}
+    for i in m_stations:
+        filepath = os.path.join(dw_directory, 'Models', 'Models',
+                                 'model_station_' + str(int(i)) + '_' + m + '.csv')
+        #if os.path.exists(filepath):
+            # Read .txt file
+        with open(filepath, 'r') as f:
+            model_d = pd.read_csv(f)
+        
+        models[m][i] = model_d
+
+#%% clean
+
+dataseta = dataset.drop(['weekday'], axis=1)
+
+imp_mean = SimpleImputer(missing_values=np.nan, strategy='median')
+imp_mean.fit(dataseta)   
+
+dataseta = pd.DataFrame(imp_mean.transform(dataseta), columns=dataseta.columns)
+
+dataseta['weekday'] = dataset['weekday'].reindex().tolist()
+
+dataseta = dataseta.dropna()    
+
+dataset_X = dataseta.drop(['bikes'], axis=1).copy()
+dataset_y = dataseta['bikes'].copy()
+
+X_train, X_test, y_train, y_test = train_test_split(dataset_X, dataset_y, 
+        
+                                                                train_size=0.8, test_size=0.2,
+                                                                random_state=0)
+
+
+# %%
+'''
+Model based generalisation
+'''
+
+'''
+create dict of all linear models by type
+'''
+
+
+mod_gen_d = {}
+
+for m in model_types:
+    mod_gen = pd.DataFrame()
+    for i in m_stations:
+        mod = models[m][i]
+
+        f = mod['feature'].tolist()
+        features_n = f[1:]
+        
+        intercept_n = f[0]
+
+        w = mod['weight'].tolist()
+        features_v = w[1:]
+        intercept_v = w[1]
+
+        if len(mod_gen) == 0:
+            mod_gen = pd.DataFrame([w])
+            #mod_gen['intercept'] = intercept_v
+        else:
+            mod_gen = mod_gen.append([w])
+    mod_gen.columns = f
+    mod_gen_d[m] = mod_gen
+#%%
+
+'''
+average all weights into a single linear model
+'''
+
+model_tests = {}
+for m in model_types:
+    model_gen_test = mod_gen_d[m]
+
+    features = model_gen_test.columns.tolist()
+    av_weights = pd.DataFrame()
+    for i in features:
+
+        av = [model_gen_test[i].mean()]
+        if len(av_weights) ==0:
+            av_weights = pd.DataFrame([av])
+            #av_weights.columns = i
+        else:
+            av_weights = pd.concat([av_weights, pd.DataFrame([av])], axis=1)
+    av_weights.columns = features
+    model_tests[m] = av_weights
+
+filepath = "/Users/jonathanerskine/Courses/Machine Learning Paradigms/CWK/MB_2021/data/USER/Models/OptimisedLinear/"
+fname = 'normal_linear'
+try:
+    os.makedirs(filepath)
+except:
+    pass
+with open(os.path.join(filepath, fname),'wb') as f:        
+    pickle.dump(model_tests,f)
+
+
+
+
+
+
+# %%
+
+
+
+
+
+
+
+#%%   
+# 
+'''
+get a prediction score using test data
+'''
+
+def model_calc (row, features_v, intercept_v):
+    row = np.array(row)
+    #print(row)
+    x = np.dot(row,features_v) + intercept_v
+    return int(x)
+
+for m in model_types:
+    m_test = model_tests[m]
+
+    features_n = m_test.columns.tolist()
+    features_n = features_n[1:]
+
+    intercept_v = [m_test.iloc[0,0]]
+    features_v = np.squeeze(m_test.drop(['(Intercept)'], axis=1).values.tolist())
+
+    X_test_filtered = X_test[features_n]
+    
+    df_X_test_filtered = X_test_filtered.copy()
+    #df_X_test_filtered = df_X_test_filtered.drop(['bikes'])
+
+    df_X_test_filtered['bikes'] = df_X_test_filtered.apply (lambda row: model_calc(row, features_v, intercept_v), axis=1)
+    preds = df_X_test_filtered['bikes']
+
+    # print('MAE using model {}'.format(str(m)), mean_absolute_error(y_test, preds))
+
+
+# %%
+'''
+Filter best performing linear models
+'''
+
+def model_calc2 (row, features_v, intercept_v):
+    row = np.array(row)
+    #print(row)
+    x = np.dot(row,features_v) + intercept_v
+    return int(x)
+
+final_set = {}
+for m in tqdm(model_types):
+    m_test = mod_gen_d[m]
+    length = np.linspace(0, 74, 75)
+    final_set_m = pd.DataFrame()
+    for i in length:
+        features = m_test.iloc[int(i)]
+        features_n = m_test.columns.tolist()
+        features_n = features_n[1:]
+
+        intercept_v = [m_test.iloc[int(i),0]]
+        features_v = features.values.tolist()
+        features_v = features[1:]
+
+        X_test_filtered = X_test[features_n]
+        
+        df_X_test_filtered = X_test_filtered.copy()
+        #df_X_test_filtered = df_X_test_filtered.drop(['bikes'])
+
+        df_X_test_filtered[i] = df_X_test_filtered.apply (lambda row: model_calc2(row, features_v, intercept_v), axis=1)
+        preds = df_X_test_filtered[i]
+
+        # print('MAE using model {}'.format(str(m)), mean_absolute_error(y_test, preds))
+
+        if mean_absolute_error(y_test, preds) < 2.9:
+            if len(final_set_m) == 0:
+                vars = intercept_v + features_v.tolist()
+                vars_n = ['Intercept'] + features_n
+                final_set_m = pd.DataFrame([vars], columns=vars_n)
+            else:
+                vars = intercept_v + features_v.tolist()
+                vars_n = ['Intercept'] + features_n
+                vars = pd.DataFrame([vars], columns=vars_n)
+                final_set_m = final_set_m.append([vars])
+            final_set[m] = final_set_m
+        else:
+            continue
+
+# %%
+'''
+Predictions using filtered linear models
+'''
+
+model_tests_filtered = {}
+for m in model_types:
+    model_gen_test = final_set[m]
+    features = model_gen_test.columns.tolist()
+    av_weights = pd.DataFrame()
+    for i in features:
+        av = model_gen_test[i].mean()
+        if len(av_weights) ==0:
+            av_weights = pd.DataFrame([av])
+        else:
+            av_weights = pd.concat([av_weights, pd.DataFrame([av])], axis=1)
+    av_weights.columns = features
+    model_tests_filtered[m] = av_weights
+
+
+
+
+
+
+
+
+
+short= ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes']
+short_temp = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'temperature.C']
+full = ['bikes_3h_ago', 'full_profile_3h_diff_bikes', 'full_profile_bikes']
+full_temp = ['bikes_3h_ago', 'full_profile_3h_diff_bikes', 'full_profile_bikes', 'temperature.C']
+short_full = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'full_profile_3h_diff_bikes', 'full_profile_bikes']
+short_full_temp = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'full_profile_3h_diff_bikes', 'full_profile_bikes', 'temperature.C']
+# %% MODELS
+
+# kernel1 = 1.0 * Matern(length_scale=1.0,length_scale_bounds=(1e-5,100000), nu=0.5)
+# kernel2 = WhiteKernel(noise_level=2.0)
+# kernel = kernel1 + kernel2
+# model = GaussianProcessRegressor(kernel=kernel,random_state=0)
+
+# model = DecisionTreeRegressor(min_samples_leaf=10, random_state=0)
+# model = RandomForestRegressor(n_estimators=100,max_features = 3,min_samples_leaf=10, random_state=0)
+#%% LINEAR MODELS
+model_types = ['full_temp','full','short_full_temp','short_full','short_temp','short']
+
+# %%
+features = (['station', 'latitude', 'longitude', 'numDocks', 
+'timestamp','year', 'month', 'day', 'hour', 'Monday', 'Tuesday', 
+'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 
+'weekhour', 'isHoliday', 'windMaxSpeed.m.s', 'windMeanSpeed.m.s', 
+'windDirection.grades', 'temperature.C', 'relHumidity.HR', 
+'airPressure.mb', 'precipitation.l.m2', 'bikes_3h_ago', 
+'full_profile_3h_diff_bikes','full_profile_bikes', 
+'short_profile_3h_diff_bikes','short_profile_bikes'])
+
+    # if Test_flag == True:
+load_config = {"Group"               :'A_individual',
+               "Features"            :features,
+               "Test"                :True,
+               "Interpolation Method":'sImpute', # "sImpute" or "delete"
+               "Weekday Method"      :'dotw',    # 'dotw' or 'wk_wknd'
+               "Light_Dark"          :False,
+               "Station Proximity"   :False,
+               "Scale Data"          :False}
+
+# %%
+X, individual_stations_X = data_loader(load_config,'X')
+
+# all_stations_X = all_stations_X.drop(['Id'],axis=1)
+
+test_all   = {"predictions":[],"MAE":[]}
+test_ind   = {"predictions":[],"MAE":[]}
+model_types = ['full_temp','full','short_full_temp','short_full','short_temp','short']
+test_model = ['full_temp']
+
+import csv
+
+model_array = []
+y_s = []
+for m in model_types:
+    exec('model_array.append(' + m + ')')
+
+# %%
+for i in range(0,len(model_types)):
+
+    x = X[model_array[i]].copy()
+    mod_str = 'rlm_' + model_types[i]
+    y_pred = [model_tests[mod_str]['(Intercept)'].values[0]]*len(x)
+
+    for j in range(0,len(model_array[i])):
+        x_comp = [x_c * model_tests[mod_str][model_array[i][j]].values[0] for x_c in x[model_array[i][j]].values.tolist()]
+        y_pred = [sum(y_c) for y_c in zip(y_pred,x_comp)]
+
+    # y_s = y_s.append(y_pred)
+    lin_test = pd.DataFrame({"bikes":y_pred})
+    lin_test.index.name = 'Id'
+    lin_test.round()
+    lin_test.index+=1
+    lin_test.to_csv('data/USER/Submissions/non_opt_linear' + model_types[i] +'submission.csv',header=["bikes"]) #,quoting=csv.QUOTE_NONE)
+
+
+
+
+
+
+
+
+
+
+
+filepath = "/Users/jonathanerskine/Courses/Machine Learning Paradigms/CWK/MB_2021/data/USER/Models/OptimisedLinear/"
+fname = 'opt_linear'
+try:
+    os.makedirs(filepath)
+except:
+    pass
+
+with open(os.path.join(filepath, fname),'wb') as f:        
+    pickle.dump(model_tests_filtered,f)
+
+#%%
+def model_calc (row, features_v, intercept_v):
+    row = np.array(row)
+    #print(row)
+    x = np.dot(row,features_v) + intercept_v
+    return int(x)
+model_types = ['rlm_full_temp', 'rlm_full', 'rlm_short_full_temp', 
+                'rlm_short_full', 'rlm_short_temp', 'rlm_short']
+
+for m in model_types:
+    print(m) 
+    print(model_tests_filtered)
+    m_test = model_tests_filtered[m]
+
+    features_n = m_test.columns.tolist()
+    features_n = features_n[1:]
+
+    intercept_v = [m_test.iloc[0,0]]
+    features_v = np.squeeze(m_test.drop(['Intercept'], axis=1).values.tolist())
+
+    X_test_filtered = X_test[features_n]
+    
+    df_X_test_filtered = X_test_filtered.copy()
+    #df_X_test_filtered = df_X_test_filtered.drop(['bikes'])
+
+    df_X_test_filtered['bikes'] = df_X_test_filtered.apply (lambda row: model_calc(row, features_v, intercept_v), axis=1)
+    preds = df_X_test_filtered['bikes']
+
+    # print('MAE using model {}'.format(str(m)), mean_absolute_error(y_test, preds))
+
+
+
+
+
+short= ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes']
+short_temp = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'temperature.C']
+full = ['bikes_3h_ago', 'full_profile_3h_diff_bikes', 'full_profile_bikes']
+full_temp = ['bikes_3h_ago', 'full_profile_3h_diff_bikes', 'full_profile_bikes', 'temperature.C']
+short_full = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'full_profile_3h_diff_bikes', 'full_profile_bikes']
+short_full_temp = ['bikes_3h_ago', 'short_profile_3h_diff_bikes', 'short_profile_bikes', 'full_profile_3h_diff_bikes', 'full_profile_bikes', 'temperature.C']
+# %% MODELS
+
+# kernel1 = 1.0 * Matern(length_scale=1.0,length_scale_bounds=(1e-5,100000), nu=0.5)
+# kernel2 = WhiteKernel(noise_level=2.0)
+# kernel = kernel1 + kernel2
+# model = GaussianProcessRegressor(kernel=kernel,random_state=0)
+
+# model = DecisionTreeRegressor(min_samples_leaf=10, random_state=0)
+# model = RandomForestRegressor(n_estimators=100,max_features = 3,min_samples_leaf=10, random_state=0)
+#%% LINEAR MODELS
+model_types = ['full_temp','full','short_full_temp','short_full','short_temp','short']
+
+# %%
+features = (['station', 'latitude', 'longitude', 'numDocks', 
+'timestamp','year', 'month', 'day', 'hour', 'Monday', 'Tuesday', 
+'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 
+'weekhour', 'isHoliday', 'windMaxSpeed.m.s', 'windMeanSpeed.m.s', 
+'windDirection.grades', 'temperature.C', 'relHumidity.HR', 
+'airPressure.mb', 'precipitation.l.m2', 'bikes_3h_ago', 
+'full_profile_3h_diff_bikes','full_profile_bikes', 
+'short_profile_3h_diff_bikes','short_profile_bikes'])
+
+    # if Test_flag == True:
+load_config = {"Group"               :'A_individual',
+               "Features"            :features,
+               "Test"                :True,
+               "Interpolation Method":'sImpute', # "sImpute" or "delete"
+               "Weekday Method"      :'dotw',    # 'dotw' or 'wk_wknd'
+               "Light_Dark"          :False,
+               "Station Proximity"   :False,
+               "Scale Data"          :False}
+
+# %%
+X, individual_stations_X = data_loader(load_config,'X')
+
+# all_stations_X = all_stations_X.drop(['Id'],axis=1)
+
+test_all   = {"predictions":[],"MAE":[]}
+test_ind   = {"predictions":[],"MAE":[]}
+model_types = ['full_temp','full','short_full_temp','short_full','short_temp','short']
+test_model = ['full_temp']
+
+import csv
+
+model_array = []
+y_s = []
+for m in model_types:
+    exec('model_array.append(' + m + ')')
+
+# %%
+for i in range(0,len(model_types)):
+
+    x = X[model_array[i]].copy()
+    mod_str = 'rlm_' + model_types[i]
+    y_pred = [model_tests_filtered[mod_str]['Intercept'].values[0]]*len(x)
+
+    for j in range(0,len(model_array[i])):
+        x_comp = [x_c * model_tests_filtered[mod_str][model_array[i][j]].values[0] for x_c in x[model_array[i][j]].values.tolist()]
+        y_pred = [sum(y_c) for y_c in zip(y_pred,x_comp)]
+
+    # y_s = y_s.append(y_pred)
+    lin_test = pd.DataFrame({"bikes":y_pred})
+    lin_test.index.name = 'Id'
+    lin_test.round()
+    lin_test.index+=1
+    lin_test.to_csv('data/USER/Submissions/linear' + model_types[i] +'submission.csv',header=["bikes"]) #,quoting=csv.QUOTE_NONE)
+
+
+
+# %%
